@@ -196,27 +196,3 @@ def test_fconv_encoder():
                 #         padded_out = 
                 assert(encoder_outputs_x.shape == (batch_size, seq_length, convolutions[-1][0]))
                 assert(encoder_outputs_y.shape == (batch_size, seq_length, convolutions[-1][0]))
-
-    for cell_type in ["lstm", "gru", "relu_rnn", "tanh_rnn"]:
-        for num_layers, num_bi_layers in [(2, 1), (3, 0)]:
-            for use_residual in [False, True]:
-                encoder = GNMTEncoder(cell_type=cell_type, num_layers=num_layers,
-                                      num_bi_layers=num_bi_layers, hidden_size=8,
-                                      dropout=0.0, use_residual=use_residual,
-                                      prefix='gnmt_encoder_')
-                encoder.initialize(ctx=ctx)
-                encoder.hybridize()
-                for batch_size in [4]:
-                    for seq_length in [5, 10]:
-                        inputs_nd = mx.nd.random.normal(0, 1, shape=(batch_size, seq_length, 4), ctx=ctx)
-                        valid_length_nd = mx.nd.array(np.random.randint(1, seq_length,
-                                                                        size=(batch_size,)), ctx=ctx)
-                        encoder_outputs, _ = encoder(inputs_nd, valid_length=valid_length_nd)
-                        valid_length_npy = valid_length_nd.asnumpy()
-                        rnn_output = encoder_outputs[0].asnumpy()
-                        for i in range(batch_size):
-                            if valid_length_npy[i] < seq_length - 1:
-                                padded_out = rnn_output[i, int(valid_length_npy[i]):, :]
-                                assert_almost_equal(padded_out, np.zeros_like(padded_out), 1E-6, 1E-6)
-                        assert(encoder_outputs[0].shape == (batch_size, seq_length, 8))
-                        assert(len(encoder_outputs[1]) == num_layers)
