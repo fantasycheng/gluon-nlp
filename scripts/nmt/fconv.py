@@ -29,8 +29,7 @@ except ImportError:
 
 class FConvEncoder(Seq2SeqEncoder):
     """Convolutional Encoder"""
-    def __init__(self, dictionary, embed_dim=512, embed_dict=None,
-                 max_positions=1024, convolutions=((512, 3),) * 20, dropout=0.1,
+    def __init__(self, embed_dim=512, convolutions=((512, 3),) * 20, dropout=0.1,
                  prefix=None, params=None):
         super(FConvEncoder, self).__init__(prefix=prefix, params=params)
         self.dropout = dropout
@@ -74,7 +73,8 @@ class FConvEncoder(Seq2SeqEncoder):
             residual = x if proj is None else proj(x)
             x = Dropout(x, p=self.dropout, training=self.training)
             x = conv(x)
-            x = glu(x, axis=1)
+            x = Dropout(x, p=self.dropout, training=self.training)
+            x = glu(x, axis=2)
             x = (x + residual) * math.sqrt(0.5)
         
         # B x C x T -> B x T x C
@@ -84,10 +84,11 @@ class FConvEncoder(Seq2SeqEncoder):
         x = self.fc2(x)
 
         # scale gradients (this only affects backward, not forward)
-        x = GradMultiply.apply(x, 1.0 / (2.0 * self.num_attention_layers))
+        # x = GradMultiply.apply(x, 1.0 / (2.0 * self.num_attention_layers))
 
         # add output to input embedding for attention
         y = (x + input_embedding) * math.sqrt(0.5)
+        return x, y
 
 def glu(inputs, axis=-1):
     if axis >= len(inputs.shape) or axis < - len(inputs.shape):
