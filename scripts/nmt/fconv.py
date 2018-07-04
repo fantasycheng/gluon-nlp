@@ -16,7 +16,9 @@
 # KIND, either express or implied.  See the License for the
 # specific language governing permissions and limitations
 # under the License.
-"""Encoder and decoder usded in convolution sequence-to-sequence learning."""
+"""Encoder and decoder used in convolution sequence-to-sequence learning."""
+__all__ = ['FConvEncoder', 'FConvDecoder', 'get_fconv_encoder_decoder']
+
 import math
 import mxnet as mx
 from mxnet.symbol import Dropout, batch_dot, softmax
@@ -28,16 +30,30 @@ try:
 except ImportError:
     from .encoder_decoder import Seq2SeqEncoder, Seq2SeqDecoder
 
-class FConvEncoder(Seq2SeqEncoder):
-    """Convolutional Encoder"""
+# 用Transformer里的PositionEmbedding替代
+def _position_encoding_init(max_length, dim):
+    """ Init the sinusoid position encoding table """
+    position_enc = np.arange(max_length).reshape((-1, 1)) \
+                   / (np.power(10000, (2. / dim) * np.arange(dim).reshape((1, -1))))
+    # Apply the cosine to even columns and sin to odds.
+    position_enc[:, 0::2] = np.sin(position_enc[:, 0::2])  # dim 2i
+    position_enc[:, 1::2] = np.cos(position_enc[:, 1::2])  # dim 2i+1
+    return position_enc
+
+class FConvEncoder(HybridBlock, Seq2SeqEncoder):
+    """Structure of the Convolutional Encoder"""
     def __init__(self, embed_dim=512, convolutions=((512, 3),) * 20, dropout=0.1,
-                 prefix=None, params=None):
+                 max_length=1024, prefix=None, params=None):
         super(FConvEncoder, self).__init__(prefix=prefix, params=params)
-        self.dropout = dropout
-        self.num_attention_layers = None
+        self._dropout = dropout
+        # self.num_attention_layers = None
 
         in_channels = convolutions[0][0]
         with self.name_scope():
+            self.position_weight = self.params.get_constant('const',
+                                                            _position_encoding_init(max_length,
+                                                                                    embed_dim))
+            self.dropout_layer = nn.Dropout(dropout)
             self.fc1 = nn.Dense(units=in_channels, dropout=dropout,
                                 flatten=False, prefix='fc1_')
             self.projections = nn.HybridSequential()
@@ -57,11 +73,11 @@ class FConvEncoder(Seq2SeqEncoder):
                 in_channels = out_channels
             self.fc2 = nn.Dense(units=embed_dim, flatten=False, prefix='fc2_')
 
-    def __call__(self, inputs, valid_length=None):
-        return super(FConvEncoder, self).__call__(inputs, valid_length=valid_length)
+    def __call__(self, inputs, states=None, valid_length=None):
+        return super(FConvEncoder, self).__call__(inputs, states, valid_length)
     
     def foward(self, inputs, valid_length=None):
-        x = Dropout(inputs, p=self.dropout, training=self.training)
+        x = self.dropout_layer(inputs)
         input_embedding = x
 
         # project to size of convolution
@@ -73,9 +89,9 @@ class FConvEncoder(Seq2SeqEncoder):
         # temporal convolutions
         for proj, conv in zip(self.projections, self.convolutions):
             residual = x if proj is None else proj(x)
-            x = Dropout(x, p=self.dropout, training=self.training)
+            x = self.dropout_layer(x)
             x = conv(x)
-            x = Dropout(x, p=self.dropout, training=self.training)
+            x = self.dropout_layer(x)
             x = glu(x, axis=2)
             x = (x + residual) * math.sqrt(0.5)
         
@@ -131,8 +147,14 @@ class FConvDecoder(Seq2SeqDecoder):
     def __call__(self, prev_output_tokens, encoder_out, incremental_state=None):
         return super(FConvDecoder, self).__call__(prev_output_tokens, encoder_out)
     
-    def forward(self, step_input, encoder_out, incremental_state=None):
+    def forward(self, inputs, encoder_out, incremental_state=None):
         encoder_a, encoder_b = _split_encoder_out(encoder_out, incremental_state)
+
+        x = Dropout(inputs, p=self.dropout, training=self.training)
+        target_embedding = x
+
+        x = self.fc1(x)
+
 
     
     def _split_encoder_out(self, encoder_out, incremental_state):
