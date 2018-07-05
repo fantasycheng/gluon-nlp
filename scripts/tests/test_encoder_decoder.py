@@ -169,24 +169,25 @@ def test_transformer_encoder_decoder():
 
 def test_fconv_encoder():
     ctx = mx.Context.default_ctx 
-    for trial in range(5):
-        embed_dim = np.random.choice([4, 8, 16, 32])
-        convolutions = []
-        for num_layers in (2, 3, 4):
-            for layer_i in range(num_layers):
-                out_channel_i = np.random.choice([8, 16, 32, 64])
-                kernel_size_i = np.random.choice([3, 4, 5, 6])
-                convolutions.append((out_channel_i, kernel_size_i))
-        encoder = FConvEncoder(embed_dim, convolutions, dropout=0.0, prefix='fconv_encoder_')
-        encoder.initialize(ctx=ctx)
-        encoder.hybridize()
-        for batch_size in [4]:
-            for seq_length in [5, 10]:
-                inputs_nd = mx.nd.random.noraml(0, 1,
-                                                shape(batch_size, seq_length, embed_dim),
-                                                ctx=ctx)
-                (encoder_outputs_x, encoder_outputs_y), _ = encoder(inputs_nd)
-                fconv_output_x = encoder_outputs_x.asnumpy()
-                fconv_output_y = encoder_outputs_y.asnumpy()
-                assert(encoder_outputs_x.shape == (batch_size, seq_length, convolutions[-1][0]))
-                assert(encoder_outputs_y.shape == (batch_size, seq_length, convolutions[-1][0]))
+    embed_dim = np.random.choice([4, 8, 16, 32])
+    num_layers = np.random.choice([2, 3, 4, 5])
+    convolutions = []
+    for layer_i in range(num_layers):
+        out_channel_i = np.random.choice([8, 16, 32, 64])
+        kernel_size_i = np.random.choice([3, 4, 5, 6])
+        convolutions.append((out_channel_i, kernel_size_i))
+    print(embed_dim)
+    print(convolutions)
+    encoder = FConvEncoder(embed_dim, convolutions=convolutions, prefix='fconv_encoder_')
+    encoder.initialize(ctx=ctx)
+    encoder.hybridize()
+    for batch_size in [4]:
+        for seq_length in [5, 10]:
+            inputs_nd = mx.nd.random.normal(0, 1,
+                                            shape = (batch_size, seq_length, embed_dim),
+                                            ctx=ctx)
+            (encoder_outputs_x, encoder_outputs_y), _ = encoder(inputs_nd)
+            fconv_output_x = encoder_outputs_x.asnumpy()
+            fconv_output_y = encoder_outputs_y.asnumpy()
+            assert(encoder_outputs_x.shape == (batch_size, seq_length, embed_dim))
+            assert(encoder_outputs_y.shape == (batch_size, seq_length, embed_dim))
