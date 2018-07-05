@@ -46,6 +46,8 @@ class FConvEncoder(HybridBlock, Seq2SeqEncoder):
                  max_length=1024, prefix=None, params=None):
         super(FConvEncoder, self).__init__(prefix=prefix, params=params)
         self._dropout = dropout
+        self._max_length = max_length
+        self._embed_dim = embed_dim
         # self.num_attention_layers = None
 
         in_channels = convolutions[0][0]
@@ -73,10 +75,30 @@ class FConvEncoder(HybridBlock, Seq2SeqEncoder):
                 in_channels = out_channels
             self.fc2 = nn.Dense(units=embed_dim, flatten=False, prefix='fc2_')
 
-    def __call__(self, inputs, states=None, valid_length=None):
-        return super(FConvEncoder, self).__call__(inputs, states, valid_length)
+    def __call__(self, inputs, states=None):
+        return super(FConvEncoder, self).__call__(inputs, states)
+
+    def forward(self, inputs, states=None, steps=None): 
+        length = inputs.shape[1]
+        steps = mx.nd.arange(length, ctx=inputs.context)
+        if states is None:
+            states = [steps]
+        else:
+            states.append(steps)
+        step_output, additional_outputs =\
+            super(FConvEncoder, self).forward(inputs, states)
+        return step_output, additional_outputs
     
-    def foward(self, inputs, valid_length=None):
+    def hybrid_forward(self, F, inputs, states=None, position_weight=None):
+        # add sinusoidal postion embedding temporarily
+        if states is not None:
+            steps = states[-1]
+            # Positional Encoding
+            inputs = F.broadcast_add(inputs, F.expand_dims(F.Embedding(steps, position_weight,
+                                                                       self._max_length,
+                                                                       self._embed_dim), axis=0))
+
+        #Need implement PositionEmbedding in future
         x = self.dropout_layer(inputs)
         input_embedding = x
 
@@ -84,7 +106,7 @@ class FConvEncoder(HybridBlock, Seq2SeqEncoder):
         x = self.fc1(x)
 
         # B x T x C -> B x C x T
-        x = x.swapaxes(1, 2)
+        x = F.swapaxes(x, 1, 2)
 
         # temporal convolutions
         for proj, conv in zip(self.projections, self.convolutions):
