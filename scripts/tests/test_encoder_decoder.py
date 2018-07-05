@@ -168,8 +168,7 @@ def test_transformer_encoder_decoder():
                         assert(len(additional_outputs) == 0)
 
 def test_fconv_encoder():
-    ctx = mx.Context.default_ctx
-    
+    ctx = mx.Context.default_ctx 
     for trial in range(5):
         embed_dim = np.random.choice([4, 8, 16, 32])
         convolutions = []
@@ -183,16 +182,11 @@ def test_fconv_encoder():
         encoder.hybridize()
         for batch_size in [4]:
             for seq_length in [5, 10]:
-                inputs_nd = mx.nd.random.noraml(0, 1, shape(batch_size, seq_length, 4), ctx=ctx)
-                valid_length_nd = mx.nd.array(np.random.randint(1, seq_length,
-                                                                size=(batch_size,)), ctx=ctx)
-                encoder_outputs_x, encoder_outputs_y = encoder(inputs_nd,
-                                                               valid_length=valid_length_nd)
-                valid_length_npy = valid_length_nd.asnumpy()
+                inputs_nd = mx.nd.random.noraml(0, 1,
+                                                shape(batch_size, seq_length, embed_dim),
+                                                ctx=ctx)
+                (encoder_outputs_x, encoder_outputs_y), _ = encoder(inputs_nd)
                 fconv_output_x = encoder_outputs_x.asnumpy()
                 fconv_output_y = encoder_outputs_y.asnumpy()
-                # for i in range(batch_size):
-                #     if valid_length_npy[i] < seq_length - 1:
-                #         padded_out = 
                 assert(encoder_outputs_x.shape == (batch_size, seq_length, convolutions[-1][0]))
                 assert(encoder_outputs_y.shape == (batch_size, seq_length, convolutions[-1][0]))

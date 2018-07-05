@@ -17,20 +17,22 @@
 # specific language governing permissions and limitations
 # under the License.
 """Encoder and decoder used in convolution sequence-to-sequence learning."""
-__all__ = ['FConvEncoder', 'FConvDecoder', 'get_fconv_encoder_decoder']
+__all__ = ['FConvEncoder', 'FConvDecoder']
 
 import math
+import numpy as np
 import mxnet as mx
 from mxnet.symbol import Dropout, batch_dot, softmax
 from mxnet.gluon import nn
-from mxnet.gluon.block import Block
+from mxnet.gluon.block import Block, HybridBlock
+
 
 try:
     from encoder_decoder import Seq2SeqEncoder, Seq2SeqDecoder
 except ImportError:
     from .encoder_decoder import Seq2SeqEncoder, Seq2SeqDecoder
 
-# 用Transformer里的PositionEmbedding替代
+# use sinusoidal position embedding temporarily
 def _position_encoding_init(max_length, dim):
     """ Init the sinusoid position encoding table """
     position_enc = np.arange(max_length).reshape((-1, 1)) \
@@ -56,8 +58,7 @@ class FConvEncoder(HybridBlock, Seq2SeqEncoder):
                                                             _position_encoding_init(max_length,
                                                                                     embed_dim))
             self.dropout_layer = nn.Dropout(dropout)
-            self.fc1 = nn.Dense(units=in_channels, dropout=dropout,
-                                flatten=False, prefix='fc1_')
+            self.fc1 = nn.Dense(units=in_channels, flatten=False, prefix='fc1_')
             self.projections = nn.HybridSequential()
             self.convolutions = nn.HybridSequential()
             for i, (out_channels, kernel_size) in enumerate(convolutions):
@@ -85,9 +86,8 @@ class FConvEncoder(HybridBlock, Seq2SeqEncoder):
             states = [steps]
         else:
             states.append(steps)
-        step_output, additional_outputs =\
-            super(FConvEncoder, self).forward(inputs, states)
-        return step_output, additional_outputs
+        outputs = super(FConvEncoder, self).forward(inputs, states)
+        return outputs, []
     
     def hybrid_forward(self, F, inputs, states=None, position_weight=None):
         # add sinusoidal postion embedding temporarily
@@ -104,6 +104,7 @@ class FConvEncoder(HybridBlock, Seq2SeqEncoder):
 
         # project to size of convolution
         x = self.fc1(x)
+        x = self.dropout_layer(x)
 
         # B x T x C -> B x C x T
         x = F.swapaxes(x, 1, 2)
@@ -143,12 +144,11 @@ class FConvDecoder(Seq2SeqDecoder):
         if isinstance(attention, bool):
             attention = [attention] * len(convolutions)
         if not isinstance(attention, list) or len(attention) != len(convolutions):
-            raise ValueError("Attention is expected to be a list of booleans of '
-                             'length equal to the number of layers.")
+            raise ValueError('Attention is expected to be a list of booleans of '
+                             'length equal to the number of layers.')
         
         with self.name_scope():
-            self.fc1 = nn.Dense(units=in_channels, dropout=dropout,
-                                flatten=False, prefix='fc1_')
+            self.fc1 = nn.Dense(units=in_channels, flatten=False, prefix='fc1_')
             self.projections = nn.HybridSequential()
             self.convolutions = nn.HybridSequential()
             self.attentions = nn.HybridSequential()
