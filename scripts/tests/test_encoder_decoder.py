@@ -176,8 +176,6 @@ def test_fconv_encoder():
         out_channel_i = np.random.choice([8, 16, 32, 64])
         kernel_size_i = np.random.choice([3, 4, 5, 6])
         convolutions.append((out_channel_i, kernel_size_i))
-    print(embed_dim)
-    print(convolutions)
     encoder = FConvEncoder(embed_dim, convolutions=convolutions, prefix='fconv_encoder_')
     encoder.initialize(ctx=ctx)
     encoder.hybridize()
