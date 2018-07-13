@@ -246,7 +246,7 @@ class FConvDecoder(HybridBlock, Seq2SeqDecoder):
         for i, (proj, conv, attn, is_attn, incr_state) in enumerate(zip(self.projections,
                                                                         self.convolutions,
                                                                         self.attentions,
-                                                                        self._is_attentions
+                                                                        self._is_attentions,
                                                                         incremental_states)):
             residual = proj(x)
             x = self.dropout_layer(x)
