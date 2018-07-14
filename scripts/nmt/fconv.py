@@ -28,9 +28,9 @@ from mxnet.gluon.block import Block, HybridBlock
 
 
 try:
-    from encoder_decoder import Seq2SeqEncoder, Seq2SeqDecoder
+    from encoder_decoder import Seq2SeqEncoder, Seq2SeqDecoder, _get_attention_cell
 except ImportError:
-    from .encoder_decoder import Seq2SeqEncoder, Seq2SeqDecoder
+    from .encoder_decoder import Seq2SeqEncoder, Seq2SeqDecoder, _get_attention_cell
 
 # use sinusoidal position embedding temporarily
 def _position_encoding_init(max_length, dim):
@@ -154,7 +154,7 @@ class FConvEncoder(HybridBlock, Seq2SeqEncoder):
 
 class FConvDecoder(HybridBlock, Seq2SeqDecoder):
     """Convolutional decoder"""
-    def __init__(self, num_embeddings, embed_dict=512, out_embed_dim=256, max_length=1024, 
+    def __init__(self, embed_dim=512, out_embed_dim=256, max_length=1024, 
                  convolutions=((512, 3),) * 20, attention=True, output_attention=False,
                  dropout=0.1, share_embed=False, prefix=None, params=None):
         super(FConvDecoder, self).__init__(prefix=None, params=None)
@@ -162,8 +162,8 @@ class FConvDecoder(HybridBlock, Seq2SeqDecoder):
         self._dropout = dropout
         self._convolutions = convolutions
         self._output_attention = output_attention
-
-        in_channels = convolutions[0][0]
+        self._max_length = max_length
+        self._embed_dim = embed_dim
         if isinstance(attention, bool):
             attention = [attention] * len(convolutions)
         if not isinstance(attention, list) or len(attention) != len(convolutions):
@@ -171,34 +171,33 @@ class FConvDecoder(HybridBlock, Seq2SeqDecoder):
                              'length equal to the number of layers.')
         self._is_attentions = attention
         self._num_attn_layers = sum(attention)
+
+        in_channels = convolutions[0][0]
         with self.name_scope():
+            self.dropout_layer = nn.Dropout(dropout)
             self.position_weight = self.params.get_constant('const',
                                                             _position_encoding_init(max_length,
-                                                                                    units))
-            self.fc1 = nn.Dense(units=in_channels, flatten=False, prefix='fc1_')
+                                                                                    embed_dim))
+            self.fc1 = nn.Dense(units=in_channels, flatten=False, in_units=embed_dim, prefix='fc1_')
             self.projections = nn.HybridSequential()
             self.convolutions = nn.HybridSequential()
             self.attentions = nn.HybridSequential()
             for i, (out_channels, kernel_size) in enumerate(convolutions):
-                self.projections.add(nn.Dense(out_channels, flatten=False, prefix='proj%d_' % i)
+                self.projections.add(nn.Dense(out_channels, flatten=False, in_units=in_channels, prefix='proj%d_' % i)
                                               if in_channels != out_channels
-                                              else HybridLambda('identity', prefix='proj%d_' % i))
-                self.convolutions.add(nn.Conv1D(out_channels * 2, kernel_size,
-                                                padding=kernel_size - 1, prefix='conv%d_' % i))
-                self.attentions.add(AttentionLayer(out_channels, embed_dim)
+                                              else nn.HybridLambda('identity', prefix='proj%d_' % i))
+                self.convolutions.add(nn.Conv1D(out_channels * 2, kernel_size, in_channels=in_channels,
+                                                prefix='conv%d_' % i))
+                self.attentions.add(AttentionLayer(out_channels, embed_dim, prefix='attn%d_' % i)
                                                    if attention[i]
-                                                   else HybridLambda('identity', prefix='attn%d_' % i))
+                                                   else nn.HybridLambda('identity', prefix='attn%d_' % i))
                 in_channels = out_channels
-            self.fc2 = nn.Dense(units=out_embed_dim, flatten=False, prefix='fc2_')
-            if share_embed:
-                pass
-            else:
-                self.fc3 = nn.Dense(units=num_embeddings)
+            self.fc2 = nn.Dense(units=out_embed_dim, flatten=False, in_units=in_channels, prefix='fc2_')
     
     def init_state_from_encoder(self, encoder_outputs):
         mem_keys, mem_values = encoder_outputs
         mem_keys.swapaxes(1, 2)
-        return encoder_outputs
+        return [mem_keys, mem_values]
     
     def decode_seq(self, inputs, states):
         output, states, additional_outputs = self.forward(inputs, states)
@@ -218,6 +217,10 @@ class FConvDecoder(HybridBlock, Seq2SeqDecoder):
                 in_channels = out_channels
             states = [incremental_states] + states
 
+            # Get mem_value length
+            self._src_length = states[2].shape[1]
+            # states.append(src_length)
+
         input_shape = step_input.shape
         if len(input_shape) == 2:
             step_input = mx.nd.expand_dims(step_input, axis=1)
@@ -225,11 +228,17 @@ class FConvDecoder(HybridBlock, Seq2SeqDecoder):
         length = step_input.shape[1]
         steps = mx.nd.arange(length, ctx=step_input.context)
         states.append(steps)
-        step_output, step_additional_outputs = super(FConvDecoder, self).forward(inputs, states)
+        
+        step_output, states, step_additional_outputs = super(FConvDecoder, self).forward(step_input,
+                                                                                         states)
         states = states[:-1]
         # If it is in testing, only output the last one
         if len(input_shape) == 2:
             step_output = step_output[:, -1, :]
+            incremental_states = states[0]
+            for i in len(incremental_states):
+                incremental_states[i] = incremental_states[i][:, :, 1:]
+    
         return step_output, states, step_additional_outputs
 
     def hybrid_forward(self, F, inputs, states, position_weight=None):
@@ -252,34 +261,32 @@ class FConvDecoder(HybridBlock, Seq2SeqDecoder):
             x = self.dropout_layer(x)
             # B x T x C -> B x C x T
             x = F.swapaxes(x, 1, 2)
-            x = F.concat(incr_state, x, dims=-1)
-            incremental_states[i] = x[:, :, 1:]
+            x = F.concat(incr_state, x, dim=-1)
+            incremental_states[i] = x
             x = conv(x)
             x = self.dropout_layer(x)
             #x is a Symbol object, so glu function need to know number of channels
             x = glu(x, conv._channels, axis=1)
             # B x C x T -> B x T x C
             x = F.swapaxes(x, 1, 2)
+            avg_attn_score = []
             if is_attn:
-                x, attn_scores = attn(x, target_embedding, (mem_keys, mem_values))
+                x, attn_scores = attn(x, target_embedding, (mem_keys, mem_values), self._src_length)
                 if self._output_attention:
                     attn_scores = attn_scores / self._num_attn_layers
-                    if avg_attn_score is None:
-                        avg_attn_score = attn_scores
+                    if len(avg_attn_score) == 0:
+                        avg_attn_score.append(attn_scores)
                     else:
-                        avg_attn_score = avg_attn_score + attn_scores
+                        avg_attn_score[0] += attn_scores
             
             x = (x + residual) * math.sqrt(0.5)
 
         # project back to size of embedding
         x = self.fc2(x)
         x = self.dropout_layer(x)
-        x = self.fc3(x)
 
         return x, states, avg_attn_score
         
-
-
 def glu(inputs, num_channels, axis=-1):
     # if axis >= len(inputs.shape) or axis < - len(inputs.shape):
     #     raise RuntimeError("%d index out of range" % (axis))
@@ -291,42 +298,38 @@ def glu(inputs, num_channels, axis=-1):
 
     return A * B.sigmoid()
 
-def Embedding(num_embeddings, embedding_dim, padding_idx):
-    pass
-
-class AttentionLayer(Block):
-    def __init__(self, conv_channels, embed_dim):
-        super().__init__()
+class AttentionLayer(HybridBlock):
+    def __init__(self, conv_channels, embed_dim, prefix=None, params=None):
+        super(AttentionLayer, self).__init__(prefix=prefix, params=params)
         # projects from output of convolution to embedding dimension
         self.in_projection = nn.Dense(embed_dim, flatten=False, in_units=conv_channels,
-                                      prefix='attention_in_proj_')
+                                      prefix=prefix + 'in_proj_')
         # projects from embedding dimension to convolution size
-        self.out_projection = nn.Dense(conv_channels, flatten=False, in_unist=embed_dim,
-                                       prefix='attention_out_proj_')
+        self.out_projection = nn.Dense(conv_channels, flatten=False, in_units=embed_dim,
+                                       prefix=prefix + 'out_proj_')
 
         # self.bmm = bmm if bmm is not None else torch.bmm
+    
+    def __call__(self, x, target_embedding, encoder_out, length):
+        return super(AttentionLayer, self).__call__(x, target_embedding, encoder_out, length)
 
-    def forward(self, x, target_embedding, encoder_out):
+    def hybrid_forward(self, F, x, target_embedding, encoder_out, length):
         residual = x
 
         # attention
-        x = (self.in_projection(x) + target_embedding) * math.sqrt(0.5)
+        x = (target_embedding + self.in_projection(x)) * math.sqrt(0.5)
         # BTC x BCT = BTT
-        x = batch_dot(x, encoder_out[0])
+        attn_scores = F.batch_dot(x, encoder_out[0], transpose_b=True)
 
         # softmax over last dim
-        sz = x.shape()
-        x = softmax(x.reshape(sz[0] * sz[1], sz[2]), axis=1)
-        x = x.reshape(*sz)
-        # attn_scores BTT
-        attn_scores = x
+        attn_scores = F.softmax(attn_scores, axis=-1)
 
         # x BTC
-        x = batch_dot(x, encoder_out[1])
+        x = F.batch_dot(attn_scores, encoder_out[1])
 
         # scale attention output
-        s = encoder_out[1].shape[1]
-        x = x * (s * math.sqrt(1.0 / s))
+        # s = encoder_out[1].shape[1]
+        x = x * (length * math.sqrt(1.0 / length))
 
         # project back
         x = (self.out_projection(x) + residual) * math.sqrt(0.5)
