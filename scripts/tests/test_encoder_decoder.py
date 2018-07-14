@@ -176,7 +176,8 @@ def test_fconv_encoder():
         out_channel_i = np.random.choice([8, 16, 32, 64])
         kernel_size_i = np.random.choice([3, 4, 5, 6])
         convolutions.append((out_channel_i, kernel_size_i))
-    encoder = FConvEncoder(embed_dim, convolutions=convolutions, prefix='fconv_encoder_')
+    encoder = FConvEncoder(embed_dim, max_length=10, convolutions=convolutions,
+                           prefix='fconv_encoder_')
     encoder.initialize(ctx=ctx)
     encoder.hybridize()
     for batch_size in [4]:
@@ -189,3 +190,52 @@ def test_fconv_encoder():
             fconv_output_y = encoder_outputs_y.asnumpy()
             assert(encoder_outputs_x.shape == (batch_size, seq_length, embed_dim))
             assert(encoder_outputs_y.shape == (batch_size, seq_length, embed_dim))
+
+def test_fconv_encoder_decoder():
+    ctx = mx.Context.default_ctx
+    embed_dim = np.random.choice([4, 8, 16, 32])
+    num_layers = np.random.choice([2, 3, 4, 5])
+    convolutions = []
+    for layer_i in range(num_layers):
+        out_channel_i = np.random.choice([8, 16, 32, 64])
+        kernel_size_i = np.random.choice([3, 4, 5, 6])
+        convolutions.append((out_channel_i, kernel_size_i))
+    encoder = FConvEncoder(embed_dim, max_length=10,
+                           convolutions=convolutions, prefix='fconv_encoder_')
+    encoder.initialize(ctx=ctx)
+    encoder.hybridize()
+    for output_attention in [True, False]:
+        # out_embed_dim = np.random.choice([4, 8, 16, 32])
+        out_embed_dim = 16
+        decoder = FConvDecoder(embed_dim, out_embed_dim, max_length=10,
+                               convolutions=convolutions,
+                               output_attention=output_attention,
+                               prefix='fconv_decoder_')
+        decoder.initialize(ctx=ctx)
+        decoder.hybridize()
+
+        for batch_size in [4]:
+            for src_seq_length, tgt_seq_length in [(5, 10), (10, 5)]:
+                src_seq_nd = mx.nd.random.normal(0, 1, shape=(batch_size, src_seq_length, embed_dim), ctx=ctx)
+                tgt_seq_nd = mx.nd.random.normal(0, 1, shape=(batch_size, tgt_seq_length, embed_dim), ctx=ctx)
+                encoder_outputs, _ = encoder(src_seq_nd)
+                decoder_states = decoder.init_state_from_encoder(encoder_outputs)
+
+                # Test multi step forwarding
+                output, new_states, additional_outputs = decoder.decode_seq(tgt_seq_nd,
+                                                                            decoder_states)
+                assert(output.shape == (batch_size, tgt_seq_length, out_embed_dim))
+
+                if output_attention:
+                    assert(len(additional_outputs) == 1)
+                    attention_out = additional_outputs[0]
+                    assert(attention_out.shape == (batch_size, tgt_seq_length, src_seq_length))
+                    # for i in range(batch_size):
+                    #     mem_v_len = int(src_valid_length_npy[i])
+                    #     if mem_v_len < src_seq_length - 1:
+                    #         assert((attention_out[i, :, :, mem_v_len:] == 0).all())
+                    #     if mem_v_len > 0:
+                    #         assert_almost_equal(attention_out[i, :, :, :].sum(axis=-1),
+                    #                             np.ones(attention_out.shape[1:3]))
+                else:
+                    assert(len(additional_outputs) == 0)
