@@ -188,7 +188,7 @@ class FConvDecoder(HybridBlock, Seq2SeqDecoder):
                                               else nn.HybridLambda('identity', prefix='proj%d_' % i))
                 self.convolutions.add(nn.Conv1D(out_channels * 2, kernel_size, in_channels=in_channels,
                                                 prefix='conv%d_' % i))
-                self.attentions.add(AttentionLayer(out_channels, embed_dim, prefix='attn%d_' % i)
+                self.attentions.add(FConvAttentionLayer(out_channels, embed_dim, prefix='attn%d_' % i)
                                                    if attention[i]
                                                    else nn.HybridLambda('identity', prefix='attn%d_' % i))
                 in_channels = out_channels
@@ -298,12 +298,13 @@ def glu(inputs, num_channels, axis=-1):
 
     return A * B.sigmoid()
 
-class AttentionLayer(HybridBlock):
-    def __init__(self, conv_channels, embed_dim, prefix=None, params=None):
-        super(AttentionLayer, self).__init__(prefix=prefix, params=params)
+class FConvAttentionLayer(HybridBlock):
+    def __init__(self, conv_channels, embed_dim, attention_cell='dot', prefix=None, params=None):
+        super(FConvAttentionLayer, self).__init__(prefix=prefix, params=params)
         # projects from output of convolution to embedding dimension
         self.in_projection = nn.Dense(embed_dim, flatten=False, in_units=conv_channels,
                                       prefix=prefix + 'in_proj_')
+        self.attention_layer = _get_attention_cell(attention_cell)
         # projects from embedding dimension to convolution size
         self.out_projection = nn.Dense(conv_channels, flatten=False, in_units=embed_dim,
                                        prefix=prefix + 'out_proj_')
@@ -311,24 +312,16 @@ class AttentionLayer(HybridBlock):
         # self.bmm = bmm if bmm is not None else torch.bmm
     
     def __call__(self, x, target_embedding, encoder_out, length):
-        return super(AttentionLayer, self).__call__(x, target_embedding, encoder_out, length)
+        return super(FConvAttentionLayer, self).__call__(x, target_embedding, encoder_out, length)
 
     def hybrid_forward(self, F, x, target_embedding, encoder_out, length):
         residual = x
 
-        # attention
         x = (target_embedding + self.in_projection(x)) * math.sqrt(0.5)
-        # BTC x BCT = BTT
-        attn_scores = F.batch_dot(x, encoder_out[0], transpose_b=True)
-
-        # softmax over last dim
-        attn_scores = F.softmax(attn_scores, axis=-1)
-
-        # x BTC
-        x = F.batch_dot(attn_scores, encoder_out[1])
+        x, attn_scores = self.attention_layer(x, encoder_out[0], encoder_out[1])
 
         # scale attention output
-        # s = encoder_out[1].shape[1]
+        # length = encoder_out[1].shape[1]
         x = x * (length * math.sqrt(1.0 / length))
 
         # project back
