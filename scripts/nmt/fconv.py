@@ -50,7 +50,7 @@ class FConvEncoder(HybridBlock, Seq2SeqEncoder):
         self._dropout = dropout
         self._max_length = max_length
         self._embed_dim = embed_dim
-        self._normalization_constant
+        self._normalization_constant = normalization_constant
         # self.num_attention_layers = None
 
         convolutions = extend_conv_spec(convolutions)
