@@ -185,11 +185,20 @@ def test_fconv_encoder():
             inputs_nd = mx.nd.random.normal(0, 1,
                                             shape = (batch_size, seq_length, embed_dim),
                                             ctx=ctx)
-            (encoder_outputs_x, encoder_outputs_y), _ = encoder(inputs_nd)
+            valid_length_nd = mx.nd.array(np.random.randint(1, seq_length,
+                                          size=(batch_size,)), ctx=ctx)
+            (encoder_outputs_x, encoder_outputs_y), _ = encoder(inputs_nd,
+                                                                valid_length=valid_length_nd)
             fconv_output_x = encoder_outputs_x.asnumpy()
             fconv_output_y = encoder_outputs_y.asnumpy()
-            assert(encoder_outputs_x.shape == (batch_size, seq_length, embed_dim))
-            assert(encoder_outputs_y.shape == (batch_size, seq_length, embed_dim))
+            valid_length_npy = valid_length_nd.asnumpy()
+            # for encoder_output in [fconv_output_x, fconv_output_y]:
+            for i in range(batch_size):
+                if valid_length_npy[i] < seq_length - 1:
+                    padded_out = fconv_output_x[i, int(valid_length_npy[i]):, :]
+                    assert_almost_equal(padded_out, np.zeros_like(padded_out), 1E-6, 1E-6)
+            assert(fconv_output_x.shape == (batch_size, seq_length, embed_dim))
+            assert(fconv_output_y.shape == (batch_size, seq_length, embed_dim))
 
 def test_fconv_encoder_decoder():
     ctx = mx.Context.default_ctx
@@ -216,26 +225,33 @@ def test_fconv_encoder_decoder():
 
         for batch_size in [4]:
             for src_seq_length, tgt_seq_length in [(5, 10), (10, 5)]:
-                src_seq_nd = mx.nd.random.normal(0, 1, shape=(batch_size, src_seq_length, embed_dim), ctx=ctx)
-                tgt_seq_nd = mx.nd.random.normal(0, 1, shape=(batch_size, tgt_seq_length, embed_dim), ctx=ctx)
-                encoder_outputs, _ = encoder(src_seq_nd)
-                decoder_states = decoder.init_state_from_encoder(encoder_outputs)
+                src_seq_nd = mx.nd.random.normal(0, 1, shape=(batch_size,
+                                                              src_seq_length,
+                                                              embed_dim), ctx=ctx)
+                tgt_seq_nd = mx.nd.random.normal(0, 1, shape=(batch_size,
+                                                              tgt_seq_length, 
+                                                              embed_dim), ctx=ctx)
+                valid_length_nd = mx.nd.array(np.random.randint(1, src_seq_length,
+                                              size=(batch_size,)), ctx=ctx)
+                encoder_outputs, _ = encoder(src_seq_nd, valid_length=valid_length_nd)
+                decoder_states = decoder.init_state_from_encoder(encoder_outputs,
+                                                                 valid_length_nd)
 
                 # Test multi step forwarding
                 output, new_states, additional_outputs = decoder.decode_seq(tgt_seq_nd,
                                                                             decoder_states)
                 assert(output.shape == (batch_size, tgt_seq_length, out_embed_dim))
-
+                src_valid_length_npy = valid_length_nd.asnumpy()
                 if output_attention:
                     assert(len(additional_outputs) == 1)
-                    attention_out = additional_outputs[0]
+                    attention_out = additional_outputs[0].asnumpy()
                     assert(attention_out.shape == (batch_size, tgt_seq_length, src_seq_length))
-                    # for i in range(batch_size):
-                    #     mem_v_len = int(src_valid_length_npy[i])
-                    #     if mem_v_len < src_seq_length - 1:
-                    #         assert((attention_out[i, :, :, mem_v_len:] == 0).all())
-                    #     if mem_v_len > 0:
-                    #         assert_almost_equal(attention_out[i, :, :, :].sum(axis=-1),
-                    #                             np.ones(attention_out.shape[1:3]))
+                    for i in range(batch_size):
+                        mem_v_len = int(src_valid_length_npy[i])
+                        if mem_v_len < src_seq_length - 1:
+                            assert((attention_out[i, :, mem_v_len:] == 0).all())
+                        if mem_v_len > 0:
+                            assert_almost_equal(attention_out[i, :, :].sum(axis=-1),
+                                                np.ones((attention_out.shape[1], )))
                 else:
                     assert(len(additional_outputs) == 0)
