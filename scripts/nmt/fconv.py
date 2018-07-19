@@ -17,7 +17,7 @@
 # specific language governing permissions and limitations
 # under the License.
 """Encoder and decoder used in convolution sequence-to-sequence learning."""
-__all__ = ['FConvEncoder', 'FConvDecoder']
+__all__ = ['FConvEncoder', 'FConvDecoder', 'get_fconv_encoder_decoder']
 
 import math
 import numpy as np
@@ -689,3 +689,46 @@ class FConvAttentionLayer(HybridBlock):
         # project back
         x = (self.out_projection(x) + residual) * math.sqrt(self._normalization_constant)
         return x, attn_scores
+
+def get_fconv_encoder_decoder(embed_dim=512, out_embed_dim, dropout=0.0,
+                              max_src_length=50, max_tgt_length=50,
+                              weight_initializer=None, bias_initializer='zeros',
+                              prefix='fconv_', params=None):
+    """Build a pair of Parallel FConv encoder/decoder
+
+    Parameters
+    ----------
+    embed_dim : int
+    out_embed_dim : int
+    dropout : float
+    max_src_length : int
+    max_tgt_length : int
+    weight_initializer : mx.init.Initializer or None
+    bias_initializer : mx.init.Initializer or None
+    prefix : str, default 'fconv_'
+        Prefix for name of `Block`s.
+    params : Parameter or None
+        Container for weight sharing between layers.
+        Created if `None`.
+
+    Returns
+    -------
+    encoder : FConvEncoder
+    decoder : FConvDecoder
+    """
+    encoder = FConvEncoder(embed_dim=embed_dim,
+                           max_length=max_src_length,
+                           dropout=dropout,
+                           weight_initializer=weight_initializer,
+                           bias_initializer=bias_initializer,
+                           prefix=prefix + 'enc_', 
+                           params=params)
+    decoder = FConvDecoder(embed_dim=embed_dim,
+                           out_embed_dim=out_embed_dim,
+                           dropout=dropout,
+                           max_length=max_tgt_length,
+                           weight_initializer=weight_initializer,
+                           bias_initializer=bias_initializer,
+                           prefix=prefix + 'dec_', 
+                           params=params)
+    return encoder, decoder
