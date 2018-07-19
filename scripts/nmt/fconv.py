@@ -45,7 +45,8 @@ def _position_encoding_init(max_length, dim):
 class FConvEncoder(HybridBlock, Seq2SeqEncoder):
     """Structure of the Convolutional Encoder"""
     def __init__(self, embed_dim=512, convolutions=((512, 3),) * 20, dropout=0.1,
-                 max_length=1024, normalization_constant=0.5, prefix=None, params=None):
+                 max_length=1024, normalization_constant=0.5, weight_initializer=None,
+                 bias_initializer='zeros', prefix=None, params=None):
         super(FConvEncoder, self).__init__(prefix=prefix, params=params)
         self._dropout = dropout
         self._max_length = max_length
@@ -60,8 +61,9 @@ class FConvEncoder(HybridBlock, Seq2SeqEncoder):
                                                             _position_encoding_init(max_length,
                                                                                     embed_dim))
             self.dropout_layer = nn.Dropout(dropout)
-            self.fc1 = nn.Dense(units=in_channels, flatten=False,
-                                in_units=embed_dim, prefix='fc1_')
+            self.fc1 = nn.Dense(units=in_channels, flatten=False, in_units=embed_dim,
+                                weight_initializer=weight_initializer,
+                                bias_initializer=bias_initializer, prefix='fc1_')
             self.projections = nn.HybridSequential()
             self.convolutions = nn.HybridSequential()
             self.residuals = []
@@ -72,9 +74,13 @@ class FConvEncoder(HybridBlock, Seq2SeqEncoder):
                     residual_dim = out_channels
                 else:
                     residual_dim = layers_in_channels[-residual]
-                self.projections.add(nn.Dense(out_channels, flatten=False, in_units=residual_dim, prefix='proj%d_' % i)
-                                              if residual_dim != out_channels
-                                              else nn.HybridLambda('identity', prefix='identity%d_' % i))
+                self.projections.add(nn.Dense(out_channels, flatten=False,
+                                              in_units=residual_dim,
+                                              weight_initializer=weight_initializer,
+                                              bias_initializer=bias_initializer,
+                                              prefix='proj%d_' % i)
+                                     if residual_dim != out_channels
+                                     else nn.HybridLambda('identity', prefix='identity%d_' % i))
 
                 if kernel_size % 2 == 1:
                     padding = kernel_size // 2
@@ -83,12 +89,15 @@ class FConvEncoder(HybridBlock, Seq2SeqEncoder):
                 #Conv1D only supports ‘BCT’ layout for now, and don't support dropout
                 self.convolutions.add(nn.Conv1D(out_channels * 2, kernel_size,
                                                 padding=padding, in_channels=in_channels,
+                                                weight_initializer=weight_initializer,
+                                                bias_initializer=bias_initializer,
                                                 prefix='conv%d_' % i))
                 self.residuals.append(residual)
                 in_channels = out_channels
                 layers_in_channels.append(out_channels)
-            self.fc2 = nn.Dense(units=embed_dim, flatten=False,
-                                in_units=in_channels, prefix='fc2_')
+            self.fc2 = nn.Dense(units=embed_dim, flatten=False, in_units=in_channels,
+                                weight_initializer=weight_initializer,
+                                bias_initializer=bias_initializer, prefix='fc2_')
 
     def __call__(self, inputs, states=None, valid_length=None):
         return super(FConvEncoder, self).__call__(inputs, states, valid_length)
@@ -190,7 +199,8 @@ class FConvDecoder(HybridBlock, Seq2SeqDecoder):
     def __init__(self, embed_dim=512, out_embed_dim=256, max_length=1024,
                  convolutions=((512, 3),) * 20, attention=True, output_attention=False,
                  dropout=0.1, share_embed=False, normalization_constant=0.5, left_pad=False,
-                 positional_embeddings=True, prefix=None, params=None):
+                 positional_embeddings=True, weight_initializer=None,
+                 bias_initializer='zeros', prefix=None, params=None):
         super(FConvDecoder, self).__init__(prefix=None, params=None)
         # self.register_buffer('version', torch.Tensor([2]))
         self._dropout = dropout
@@ -216,7 +226,9 @@ class FConvDecoder(HybridBlock, Seq2SeqDecoder):
             self.position_weight = self.params.get_constant('const',
                 _position_encoding_init(max_length, embed_dim)) if positional_embeddings else None
 
-            self.fc1 = nn.Dense(units=in_channels, flatten=False, in_units=embed_dim, prefix='fc1_')
+            self.fc1 = nn.Dense(units=in_channels, flatten=False, in_units=embed_dim,
+                                weight_initializer=weight_initializer,
+                                bias_initializer=bias_initializer, prefix='fc1_')
             self.projections = nn.HybridSequential()
             self.convolutions = nn.HybridSequential()
             self.attentions = nn.HybridSequential()
@@ -229,18 +241,28 @@ class FConvDecoder(HybridBlock, Seq2SeqDecoder):
                 else:
                     residual_dim = layers_in_channels[-residual]
                 self.projections.add(nn.Dense(out_channels, flatten=False, in_units=in_channels,
+                                              weight_initializer=weight_initializer,
+                                              bias_initializer=bias_initializer,
                                               prefix='proj%d_' % i)
-                                              if residual_dim != out_channels
-                                              else nn.HybridLambda('identity', prefix='proj%d_' % i))
-                self.convolutions.add(nn.Conv1D(out_channels * 2, kernel_size, in_channels=in_channels,
-                                                padding=kernel_size-1, prefix='conv%d_' % i))
-                self.attentions.add(FConvAttentionLayer(out_channels, embed_dim, prefix='attn%d_' % i)
-                                                   if attention[i]
-                                                   else nn.HybridLambda('identity', prefix='attn%d_' % i))
+                                     if residual_dim != out_channels
+                                     else nn.HybridLambda('identity', prefix='proj%d_' % i))
+                self.convolutions.add(nn.Conv1D(out_channels * 2, kernel_size,
+                                                in_channels=in_channels, padding=kernel_size-1, 
+                                                weight_initializer=weight_initializer,
+                                                bias_initializer=bias_initializer, 
+                                                prefix='conv%d_' % i))
+                self.attentions.add(FConvAttentionLayer(out_channels, embed_dim,
+                                                        weight_initializer=weight_initializer,
+                                                        bias_initializer=bias_initializer,
+                                                        prefix='attn%d_' % i)
+                                    if attention[i]
+                                    else nn.HybridLambda('identity', prefix='attn%d_' % i))
                 self.residuals.append(residual)
                 in_channels = out_channels
                 layers_in_channels.append(out_channels)
-            self.fc2 = nn.Dense(units=out_embed_dim, flatten=False, in_units=in_channels, prefix='fc2_')
+            self.fc2 = nn.Dense(units=out_embed_dim, flatten=False, in_units=in_channels,
+                                weight_initializer=weight_initializer,
+                                bias_initializer=bias_initializer, prefix='fc2_')
     
     def init_state_from_encoder(self, encoder_outputs, encoder_valid_length=None):
         mem_keys, mem_values = encoder_outputs
@@ -387,15 +409,20 @@ def extend_conv_spec(convolutions):
 
 class FConvAttentionLayer(HybridBlock):
     def __init__(self, conv_channels, embed_dim, normalization_constant=0.5,
-                 attention_cell='dot', prefix=None, params=None):
+                 attention_cell='dot', weight_initializer=None, bias_initializer='zeros',
+                 prefix=None, params=None):
         super(FConvAttentionLayer, self).__init__(prefix=prefix, params=params)
         self._normalization_constant = normalization_constant
         # projects from output of convolution to embedding dimension
         self.in_projection = nn.Dense(embed_dim, flatten=False, in_units=conv_channels,
+                                      weight_initializer=weight_initializer,
+                                      bias_initializer=bias_initializer,
                                       prefix=prefix + 'in_proj_')
         self.attention_layer = _get_attention_cell(attention_cell)
         # projects from embedding dimension to convolution size
         self.out_projection = nn.Dense(conv_channels, flatten=False, in_units=embed_dim,
+                                       weight_initializer=weight_initializer,
+                                       bias_initializer=bias_initializer,
                                        prefix=prefix + 'out_proj_')
     
     def __call__(self, x, target_embedding, encoder_out, mask):
