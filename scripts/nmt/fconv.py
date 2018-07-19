@@ -199,7 +199,6 @@ class FConvDecoder(HybridBlock, Seq2SeqDecoder):
         self._positional_embeddings = positional_embeddings
 
         convolutions = extend_conv_spec(convolutions)
-        self._convolutions = convolutions
         self._output_attention = output_attention
         self._max_length = max_length
         self._embed_dim = embed_dim
@@ -234,7 +233,7 @@ class FConvDecoder(HybridBlock, Seq2SeqDecoder):
                                               if residual_dim != out_channels
                                               else nn.HybridLambda('identity', prefix='proj%d_' % i))
                 self.convolutions.add(nn.Conv1D(out_channels * 2, kernel_size, in_channels=in_channels,
-                                                prefix='conv%d_' % i))
+                                                padding=kernel_size-1, prefix='conv%d_' % i))
                 self.attentions.add(FConvAttentionLayer(out_channels, embed_dim, prefix='attn%d_' % i)
                                                    if attention[i]
                                                    else nn.HybridLambda('identity', prefix='attn%d_' % i))
@@ -254,10 +253,10 @@ class FConvDecoder(HybridBlock, Seq2SeqDecoder):
         else:
             mem_masks = mx.nd.ones((batch_size, mem_length))
         decoder_states.append(mem_masks)
-        self._encoder_valid_length = encoder_valid_length
         return decoder_states
     
     def decode_seq(self, inputs, states):
+        states = [None] + states
         output, states, additional_outputs = self.forward(inputs, states)
         return output, states, additional_outputs
 
@@ -267,53 +266,42 @@ class FConvDecoder(HybridBlock, Seq2SeqDecoder):
     def forward(self, step_input, states):  
         input_shape = step_input.shape
         if len(input_shape) == 2:
-            step_input = mx.nd.expand_dims(step_input, axis=1)
+            has_last_embed = (len(states) == 4)
+            if has_last_embed:
+                last_embed = states[0]
+                step_input = mx.nd.concat(last_embed,
+                                        mx.nd.expand_dims(step_input, axis=1),
+                                        dim=1)
+                states = states[1:]
+            else:
+                step_input = mx.nd.expand_dims(step_input, axis=1)
+        elif states[0] is None:
+            states = states[1:]
 
-        if len(states) == 3:
-            batch_size, length, input_dims = step_input.shape
-
-            mem_mask = states[-1]
-            # print(mem_mask.shape)
-            # print(step_input.shape)
-            mem_mask = mx.nd.expand_dims(mem_mask, axis=1)\
+        mem_mask = states[-1]
+        augmented_mem_mask = mx.nd.expand_dims(mem_mask, axis=1)\
                 .broadcast_axes(axis=1, size=step_input.shape[1])
-            # print(mem_mask.shape)
-            states = states[:-1] + [mem_mask]
+        states[-1] = augmented_mem_mask
 
-            incremental_states = []
-            in_channels = self._convolutions[0][0]
-            for out_channels, kernel_size, _ in self._convolutions:
-                incremental_states.append(mx.nd.zeros((batch_size, in_channels, kernel_size-1),
-                                                      ctx=step_input.context))
-                in_channels = out_channels
-            states = [incremental_states] + states
-
-            # Get mem_value length
-            # self._src_length = states[2].shape[1]
-        
-        steps = mx.nd.arange(length, ctx=step_input.context)
+        steps = mx.nd.arange(step_input.shape[1], ctx=step_input.context)
         states.append(steps)
         
-        step_output, states, step_additional_outputs = super(FConvDecoder, self).forward(step_input,
-                                                                                         states)
+        step_output, step_additional_outputs = \
+            super(FConvDecoder, self).forward(step_input, states)
         states = states[:-1]
+        states[-1] = mem_mask
+        new_states = [step_input] + states
         # If it is in testing, only output the last one
         if len(input_shape) == 2:
             step_output = step_output[:, -1, :]
-            incremental_states = states[0]
-            for i in len(incremental_states):
-                incremental_states[i] = incremental_states[i][:, :, 1:]
     
-        return step_output, states, step_additional_outputs
+        return step_output, new_states, step_additional_outputs
 
     def hybrid_forward(self, F, inputs, states, position_weight=None):
-        # if len(states) == 4:
-        #     incremental_states, mem_keys, mem_values, steps = states
-        #     mem_masks = None
-        if len(states) == 5:
-            incremental_states, mem_keys, mem_values, mem_masks, steps = states
+        if len(states) == 4:
+            mem_keys, mem_values, mem_masks, steps = states
         else:
-            raise ValueError('States is expected to be a list with 5 items')
+            raise ValueError('States is expected to be a list with 4 items')
 
         # add position embedding
         if self._positional_embeddings:
@@ -330,13 +318,11 @@ class FConvDecoder(HybridBlock, Seq2SeqDecoder):
 
         avg_attn_score = []
         residuals = [x]
-        for i, (proj, conv, attn, is_attn, res_layer, incr_state) in enumerate(zip(
-                                                                        self.projections,
-                                                                        self.convolutions,
-                                                                        self.attentions,
-                                                                        self._is_attentions,
-                                                                        self.residuals,
-                                                                        incremental_states)):
+        for i, (proj, conv, attn, is_attn, res_layer) in enumerate(zip(self.projections,
+                                                                       self.convolutions,
+                                                                       self.attentions,
+                                                                       self._is_attentions,
+                                                                       self.residuals)):
             if res_layer > 0:
                 residual = residuals[-res_layer]
                 residual = proj(x)
@@ -345,9 +331,8 @@ class FConvDecoder(HybridBlock, Seq2SeqDecoder):
             x = self.dropout_layer(x)
             # B x T x C -> B x C x T
             x = F.swapaxes(x, 1, 2)
-            x = F.concat(incr_state, x, dim=-1)
-            incremental_states[i] = x
             x = conv(x)
+            x = F.slice_axis(x, axis=-1, begin=0, end=-conv._kwargs['pad'][0])
             x = self.dropout_layer(x)
             #x is a Symbol object, so glu function need to know number of channels
             x = glu(x, conv._channels, axis=1)
@@ -371,7 +356,7 @@ class FConvDecoder(HybridBlock, Seq2SeqDecoder):
         x = self.fc2(x)
         x = self.dropout_layer(x)
 
-        return x, states, avg_attn_score
+        return x, avg_attn_score
         
 def glu(inputs, num_channels, axis=-1):
     # if axis >= len(inputs.shape) or axis < - len(inputs.shape):
