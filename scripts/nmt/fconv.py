@@ -43,7 +43,32 @@ def _position_encoding_init(max_length, dim):
     return position_enc
 
 class FConvEncoder(HybridBlock, Seq2SeqEncoder):
-    """Structure of the Convolutional Encoder"""
+    """Structure of the Convolutional Encoder
+
+    Parameters
+    ----------
+    embed_dim : int
+    convolutions: tuple of tuple
+        every tuple in convolutions is like (out_channels, kernel_size, residual) or 
+        (out_channels, kernel_size). Residual indicate how many layer before used as
+        residual, if residual is not provided, set residual as 1.
+    dropout : float
+    max_length : int
+        Maximum length of the input sequence
+    normalization_constant: float
+        Number to scale the output by the sqrt of it
+    weight_initializer : str or Initializer
+        Initializer for the input weights matrix, used for the linear
+        transformation of the inputs.
+    bias_initializer : str or Initializer
+        Initializer for the bias vector.
+    prefix : str, default 'rnn_'
+        Prefix for name of `Block`s
+        (and name of weight if params is `None`).
+    params : Parameter or None
+        Container for weight sharing between cells.
+        Created if `None`.
+    """
     def __init__(self, embed_dim=512, convolutions=((512, 3),) * 20, dropout=0.1,
                  max_length=1024, normalization_constant=0.5, weight_initializer=None,
                  bias_initializer='zeros', prefix=None, params=None):
@@ -100,19 +125,52 @@ class FConvEncoder(HybridBlock, Seq2SeqEncoder):
                                 bias_initializer=bias_initializer, prefix='fc2_')
 
     def __call__(self, inputs, states=None, valid_length=None):
+        """Encoder the inputs given the states and valid sequence length.
+
+        Parameters
+        ----------
+        inputs : NDArray
+            Input sequence. Shape (batch_size, length, C_in)
+        states : list of NDArrays or None
+            Initial states. The list of initial states and masks
+        valid_length : NDArray or None
+            Valid lengths of each sequence. This is usually used when part of sequence has
+            been padded. Shape (batch_size,)
+
+        Returns
+        -------
+        encoder_outputs: list
+            Outputs of the encoder. Contains:
+            - outputs x of the convolutional encoder, used as mem_key in convolutional 
+              decoder. Shape (batch_size, length, C_out)
+            - outputs y of the convolutional encoder, used as mem_value in convolutional
+              decoder. Shape (batch_size, length, C_out)
+        additional_outputs: empty list
+        """
         return super(FConvEncoder, self).__call__(inputs, states, valid_length)
 
-    def forward(self, inputs, states=None, valid_length=None, steps=None): 
+    def forward(self, inputs, states=None, valid_length=None):
+        """
+
+        Parameters
+        ----------
+        inputs : NDArray, Shape(batch_size, length, C_in)
+        states : list of NDArray
+        valid_length : NDArray
+
+        Returns
+        -------
+        encoder_outputs: list
+            Outputs of the encoder. Contains:
+            - outputs x of the convolutional encoder, used as mem_key in convolutional 
+              decoder. Shape (batch_size, length, C_out)
+            - outputs y of the convolutional encoder, used as mem_value in convolutional
+              decoder. Shape (batch_size, length, C_out)
+        additional_outputs: empty list
+
+        """
         length = inputs.shape[1]
-        # if valid_length is not None:
-        #     mask = mx.nd.broadcast_lesser(
-        #         mx.nd.arange(length, ctx=inputs.context).reshape((1, -1)),
-        #         valid_length.reshape((-1, 1)))
-        #     mask = mx.nd.broadcast_axes(mx.nd.expand_dims(mask, axis=1), axis=1, size=length)
-        #     if states is None:
-        #         states.append(mask)
-        #     else:
-        #         states.append(mask)
+        
         steps = mx.nd.arange(length, ctx=inputs.context)
         if states is None:
             states = [steps]
@@ -123,6 +181,26 @@ class FConvEncoder(HybridBlock, Seq2SeqEncoder):
         return (x, y), []
     
     def hybrid_forward(self, F, inputs, states=None, valid_length=None, position_weight=None):
+        """
+
+        Parameters
+        ----------
+        inputs : NDArray or Symbol, Shape(batch_size, length, C_in)
+        states : list of NDArray or Symbol
+        valid_length : NDArray or Symbol
+        position_weight : NDArray or Symbol
+
+        Returns
+        -------
+        encoder_outputs: list
+            Outputs of the encoder. Contains:
+            - outputs x of the convolutional encoder, used as mem_key in convolutional 
+              decoder. Shape (batch_size, length, C_out)
+            - outputs y of the convolutional encoder, used as mem_value in convolutional
+              decoder. Shape (batch_size, length, C_out)
+        additional_outputs: empty list
+
+        """
         # add sinusoidal postion embedding temporarily
         if states is not None:
             steps = states[-1]
@@ -131,7 +209,6 @@ class FConvEncoder(HybridBlock, Seq2SeqEncoder):
                                                                        self._max_length,
                                                                        self._embed_dim), axis=0))
 
-        #Need implement PositionEmbedding in future
         x = self.dropout_layer(inputs)
         input_embedding = x
 
@@ -195,17 +272,50 @@ class FConvEncoder(HybridBlock, Seq2SeqEncoder):
         return (x, y), []
 
 class FConvDecoder(HybridBlock, Seq2SeqDecoder):
-    """Convolutional decoder"""
-    def __init__(self, embed_dim=512, out_embed_dim=256, max_length=1024,
-                 convolutions=((512, 3),) * 20, attention=True, output_attention=False,
-                 dropout=0.1, share_embed=False, normalization_constant=0.5, left_pad=False,
-                 positional_embeddings=True, weight_initializer=None,
-                 bias_initializer='zeros', prefix=None, params=None):
+    """Structure of the Convolutional decoder
+    
+    Parameters
+    ----------
+    embed_dim : int
+    out_embed_dim : int
+    convolutions: tuple of tuple
+        every tuple in convolutions is like (out_channels, kernel_size, residual) or 
+        (out_channels, kernel_size). Residual indicate how many layer before used as
+        residual, if residual is not provided, set residual as 1.
+    dropout : float
+    max_length : int
+        Maximum length of the input sequence
+    normalization_constant: float
+        Number to scale the output by the sqrt of it
+    attention: bool or list
+        Whether 
+    attention_cell: AttentionCell or str, default 'dot'
+        Arguments of the attention cell.
+        Can be 'multi_head', 'scaled_luong', 'scaled_dot', 'dot', 'cosine', 'normed_mlp', 'mlp'
+    output_attention: bool
+        Whether to output the attention weights
+    positional_embeddings: bool
+        Whether to add positional embeddings
+    weight_initializer : str or Initializer
+        Initializer for the input weights matrix, used for the linear
+        transformation of the inputs.
+    bias_initializer : str or Initializer
+        Initializer for the bias vector.
+    prefix : str, default 'rnn_'
+        Prefix for name of `Block`s
+        (and name of weight if params is `None`).
+    params : Parameter or None
+        Container for weight sharing between cells.
+        Created if `None`.
+    """
+    def __init__(self, embed_dim=512, out_embed_dim=256, convolutions=((512, 3),) * 20,
+                 dropout=0.1, max_length=1024, normalization_constant=0.5, attention=True,
+                 attention_cell='dot', output_attention=False, positional_embeddings=True, 
+                 weight_initializer=None, bias_initializer='zeros', prefix=None, params=None):
         super(FConvDecoder, self).__init__(prefix=None, params=None)
         # self.register_buffer('version', torch.Tensor([2]))
         self._dropout = dropout
         self._normalization_constant = normalization_constant
-        self._left_pad = left_pad
         self._positional_embeddings = positional_embeddings
 
         convolutions = extend_conv_spec(convolutions)
@@ -251,7 +361,8 @@ class FConvDecoder(HybridBlock, Seq2SeqDecoder):
                                                 weight_initializer=weight_initializer,
                                                 bias_initializer=bias_initializer, 
                                                 prefix='conv%d_' % i))
-                self.attentions.add(FConvAttentionLayer(out_channels, embed_dim,
+                self.attentions.add(FConvAttentionLayer(out_channels, embed_dim, 
+                                                        attention_cell=attention_cell,
                                                         weight_initializer=weight_initializer,
                                                         bias_initializer=bias_initializer,
                                                         prefix='attn%d_' % i)
@@ -265,6 +376,22 @@ class FConvDecoder(HybridBlock, Seq2SeqDecoder):
                                 bias_initializer=bias_initializer, prefix='fc2_')
     
     def init_state_from_encoder(self, encoder_outputs, encoder_valid_length=None):
+        """Initialize the state from the encoder outputs.
+
+        Parameters
+        ----------
+        encoder_outputs : list
+        encoder_valid_length : NDArray or None
+
+        Returns
+        -------
+        decoder_states : list
+            The decoder states, includes:
+
+            - mem_keys : NDArray
+            - mem_values : NDArray
+            - mem_masks : NDArray
+        """
         mem_keys, mem_values = encoder_outputs
         decoder_states = [mem_keys, mem_values]
         batch_size, mem_length = mem_values.shape[:-1]
@@ -278,14 +405,81 @@ class FConvDecoder(HybridBlock, Seq2SeqDecoder):
         return decoder_states
     
     def decode_seq(self, inputs, states):
+        """Decode the decoder inputs. This function is only used for training.
+
+        Parameters
+        ----------
+        inputs : NDArray, Shape (batch_size, length, C_in)
+        states : list of NDArrays or None
+            Initial states. The list of decoder states
+
+        Returns
+        -------
+        output : NDArray, Shape (batch_size, length, C_out)
+        states : list
+            The decoder states, includes:
+
+            - mem_keys : NDArray
+            - mem_values : NDArray
+            - mem_masks : NDArray
+        additional_outputs : list of list
+            Either be an empty list or contains the attention weights in this step.
+            The attention weights will have shape (batch_size, length, mem_length)
+        """
         states = [None] + states
         output, states, additional_outputs = self.forward(inputs, states)
+        states = states[1:]
         return output, states, additional_outputs
 
-    def __call__(self, inputs, states):
+    def __call__(self, step_input, states):
+        """One-step-ahead decoding of the FConvDecoder.
+
+        Parameters
+        ----------
+        step_input : NDArray
+        states : list of NDArray
+
+        Returns
+        -------
+        step_output : NDArray
+            The output of the decoder.
+            In the train mode, Shape is (batch_size, length, C_out)
+            In the test mode, Shape is (batch_size, C_out)
+        new_states: list
+            Includes
+            - last_embeds : NDArray or None
+            - mem_keys : NDArray
+            - mem_value : NDArray
+            - mem_masks : NDArray
+        step_additional_outputs : list of list
+            Either be an empty list or contains the attention weights in this step.
+            The attention weights will have shape (batch_size, length, mem_length)
+        """
         return super(FConvDecoder, self).__call__(inputs, states)
     
-    def forward(self, step_input, states):  
+    def forward(self, step_input, states):
+        """
+        Parameters
+        ----------
+        step_input : NDArray
+        states : list of NDArray
+
+        Returns
+        -------
+        step_output : NDArray
+            The output of the decoder.
+            In the train mode, Shape is (batch_size, length, C_out)
+            In the test mode, Shape is (batch_size, C_out)
+        new_states: list
+            Includes
+            - last_embeds : NDArray or None
+            - mem_keys : NDArray
+            - mem_value : NDArray
+            - mem_masks : NDArray
+        step_additional_outputs : list of list
+            Either be an empty list or contains the attention weights in this step.
+            The attention weights will have shape (batch_size, length, mem_length)
+        """
         input_shape = step_input.shape
         if len(input_shape) == 2:
             has_last_embed = (len(states) == 4)
@@ -319,7 +513,22 @@ class FConvDecoder(HybridBlock, Seq2SeqDecoder):
     
         return step_output, new_states, step_additional_outputs
 
-    def hybrid_forward(self, F, inputs, states, position_weight=None):
+    def hybrid_forward(self, F, step_input, states, position_weight=None):
+        """
+        Parameters
+        ----------
+        step_input : NDArray or Symbol, Shape (batch_size, length, C_in)
+        states : list of NDArray or Symbol
+        position_weight : NDArray or Symbol
+
+        Returns
+        -------
+        step_output : NDArray or Symbol
+            The output of the decoder. Shape is (batch_size, length, C_out)
+        step_additional_outputs : list
+            Either be an empty list or contains the attention weights in this step.
+            The attention weights will have shape (batch_size, length, mem_length)
+        """
         if len(states) == 4:
             mem_keys, mem_values, mem_masks, steps = states
         else:
@@ -330,9 +539,9 @@ class FConvDecoder(HybridBlock, Seq2SeqDecoder):
             position_embed = F.expand_dims(F.Embedding(steps, position_weight,
                                                        self._max_length,
                                                        self._embed_dim), axis=0)
-            inputs = F.broadcast_add(inputs, position_embed)
+            step_input = F.broadcast_add(step_input, position_embed)
 
-        x = self.dropout_layer(inputs)
+        x = self.dropout_layer(step_input)
         target_embedding = x
         # project to size of convolution
         x = self.fc1(x)  #x.shape (B, T, convolutions[0][0])
@@ -381,9 +590,6 @@ class FConvDecoder(HybridBlock, Seq2SeqDecoder):
         return x, avg_attn_score
         
 def glu(inputs, num_channels, axis=-1):
-    # if axis >= len(inputs.shape) or axis < - len(inputs.shape):
-    #     raise RuntimeError("%d index out of range" % (axis))
-    # d = inputs.shape[axis]
     if num_channels % 2 == 1:
         raise RuntimeError("Inputs size in axis %d must be even" % axis)
     A = inputs.slice_axis(axis=axis, begin=0, end=num_channels//2)
@@ -408,6 +614,29 @@ def extend_conv_spec(convolutions):
     return tuple(extended)
 
 class FConvAttentionLayer(HybridBlock):
+    """Structure of the attention layer in Convolutional decoder
+    
+    Parameters
+    ----------
+    conv_channels : int
+    embed_dim : int
+    normalization_constant: float
+        Number to scale the output by the sqrt of it
+    attention_cell: AttentionCell or str, default 'dot'
+        Arguments of the attention cell.
+        Can be 'multi_head', 'scaled_luong', 'scaled_dot', 'dot', 'cosine', 'normed_mlp', 'mlp'
+    weight_initializer : str or Initializer
+        Initializer for the input weights matrix, used for the linear
+        transformation of the inputs.
+    bias_initializer : str or Initializer
+        Initializer for the bias vector.
+    prefix : str, default 'rnn_'
+        Prefix for name of `Block`s
+        (and name of weight if params is `None`).
+    params : Parameter or None
+        Container for weight sharing between cells.
+        Created if `None`.
+    """
     def __init__(self, conv_channels, embed_dim, normalization_constant=0.5,
                  attention_cell='dot', weight_initializer=None, bias_initializer='zeros',
                  prefix=None, params=None):
@@ -429,6 +658,25 @@ class FConvAttentionLayer(HybridBlock):
         return super(FConvAttentionLayer, self).__call__(x, target_embedding, encoder_out, mask)
 
     def hybrid_forward(self, F, x, target_embedding, encoder_out, mask):
+        """
+        Parameters
+        ----------
+        x : NDArray or Symbol, Shape (batch_size, length, conv_channels)
+        target_embedding: NDArray or Symbol, Shape (batch_size, length, embed_dim)
+        encoder_out : list of NDArray or Symbol
+            - mem_keys : NDArray or Symbol, Shape (batch_size, length, embed_dim)
+                         used to compute attention scores
+            - mem_value : NDArray or Symbol, Shape (batch_size, length, embed_dim)
+                         used to compute attention results
+        mask : NDArray or Symbol
+
+        Returns
+        -------
+        x : NDArray or Symbol
+            The output of the attention layer. Shape is (batch_size, length, conv_channels)
+        attn_scores : NDArray or Symbol
+            The attention scores will have shape (batch_size, length, mem_length)
+        """
         residual = x
 
         x = (target_embedding + self.in_projection(x)) * math.sqrt(self._normalization_constant)
